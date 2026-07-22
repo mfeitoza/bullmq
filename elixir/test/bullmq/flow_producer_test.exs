@@ -91,7 +91,10 @@ defmodule BullMQ.FlowProducerTest do
 
       # Parent should be in waiting-children state
       ctx = Keys.new(queue_name, prefix: "bull")
-      {:ok, wc_list} = RedisConnection.command(conn, ["ZRANGE", Keys.waiting_children(ctx), 0, -1])
+
+      {:ok, wc_list} =
+        RedisConnection.command(conn, ["ZRANGE", Keys.waiting_children(ctx), 0, -1])
+
       assert result.job.id in wc_list
 
       # Child should be in waiting state
@@ -123,7 +126,10 @@ defmodule BullMQ.FlowProducerTest do
 
       # Parent should be in waiting-children
       ctx = Keys.new(queue_name, prefix: "bull")
-      {:ok, wc_list} = RedisConnection.command(conn, ["ZRANGE", Keys.waiting_children(ctx), 0, -1])
+
+      {:ok, wc_list} =
+        RedisConnection.command(conn, ["ZRANGE", Keys.waiting_children(ctx), 0, -1])
+
       assert result.job.id in wc_list
 
       # All children should be in waiting
@@ -621,6 +627,166 @@ defmodule BullMQ.FlowProducerTest do
 
       Agent.stop(processed_order)
       Worker.close(worker)
+    end
+
+    @tag timeout: 60_000
+    test "parent is executed when children has ignore_dependency_on_failure and fails", %{
+      queue_name: queue_name,
+      conn: conn
+    } do
+      test_pid = self()
+
+      {:ok, worker} =
+        Worker.start_link(
+          queue: queue_name,
+          connection: conn,
+          processor: fn job ->
+            send(test_pid, {:processed, job.name, job.id})
+
+            if job.name == "child_failing" do
+              {:error, "child failed"}
+            else
+              if job.name == "parent" do
+                parent_job = %Job{
+                  id: job.id,
+                  name: job.name,
+                  queue_name: queue_name,
+                  data: job.data,
+                  connection: conn,
+                  prefix: "bull"
+                }
+
+                {:ok, ignored_failures} = Job.get_ignored_children_failures(parent_job)
+                send(test_pid, {:ignored_failures, ignored_failures})
+              end
+
+              {:ok, %{result: job.name}}
+            end
+          end
+        )
+
+      flow = %{
+        name: "parent",
+        queue_name: queue_name,
+        data: %{type: "parent"},
+        children: [
+          %{
+            name: "child_failing",
+            queue_name: queue_name,
+            data: %{id: 1},
+            opts: %{ignore_dependency_on_failure: true}
+          }
+        ]
+      }
+
+      {:ok, result} = FlowProducer.add(flow, connection: conn)
+      parent_id = result.job.id
+
+      # Wait for child to be processed and fail
+      assert_receive {:processed, "child_failing", _child_id}, 10_000
+
+      # Parent should be executed and not stay in wait / waiting-children state
+      assert_receive {:processed, "parent", ^parent_id}, 10_000
+
+      # Parent received ignored child failure
+      assert_receive {:ignored_failures, ignored_failures}, 10_000
+      assert map_size(ignored_failures) == 1
+
+      # Verify parent is no longer in waiting-children set
+      ctx = Keys.new(queue_name, prefix: "bull")
+
+      {:ok, wc_list} =
+        RedisConnection.command(conn, ["ZRANGE", Keys.waiting_children(ctx), 0, -1])
+
+      refute parent_id in wc_list
+
+      Worker.close(worker)
+    end
+
+    @tag timeout: 60_000
+    test "parent and child in different queues: parent is executed when child has ignore_dependency_on_failure and fails",
+         %{
+           queue_name: queue_name,
+           conn: conn
+         } do
+      test_pid = self()
+      parent_queue = queue_name
+      child_queue = "#{parent_queue}_child"
+
+      {:ok, worker_child} =
+        Worker.start_link(
+          queue: child_queue,
+          connection: conn,
+          processor: fn job ->
+            send(test_pid, {:processed, job.name, job.id})
+            {:error, %{result: "Failed"}}
+          end
+        )
+
+      {:ok, worker_parent} =
+        Worker.start_link(
+          queue: parent_queue,
+          connection: conn,
+          processor: fn job ->
+            send(test_pid, {:processed, job.name, job.id})
+
+            parent_job = %Job{
+              id: job.id,
+              name: job.name,
+              queue_name: parent_queue,
+              data: job.data,
+              connection: conn,
+              prefix: "bull"
+            }
+
+            {:ok, ignored_failures} = Job.get_ignored_children_failures(parent_job)
+            send(test_pid, {:ignored_failures, ignored_failures})
+
+            {:ok, %{result: job.name}}
+          end
+        )
+
+      flow = %{
+        name: "parent",
+        queue_name: parent_queue,
+        data: %{type: "parent"},
+        children: [
+          %{
+            name: "child_failing",
+            queue_name: child_queue,
+            data: %{id: 1},
+            opts: %{
+              attempts: 1,
+              fail_parent_on_failure: false,
+              ignore_dependency_on_failure: true
+            }
+          }
+        ]
+      }
+
+      {:ok, result} = FlowProducer.add(flow, connection: conn)
+      parent_id = result.job.id
+
+      # Wait for child to be processed and fail
+      assert_receive {:processed, "child_failing", _child_id}, 10_000
+
+      # Parent should be executed and not stay in wait / waiting-children state
+      assert_receive {:processed, "parent", ^parent_id}, 10_000
+
+      # Parent received ignored child failure
+      assert_receive {:ignored_failures, ignored_failures}, 10_000
+      assert map_size(ignored_failures) == 1
+
+      # Verify parent is no longer in waiting-children set
+      ctx = Keys.new(parent_queue, prefix: "bull")
+
+      {:ok, wc_list} =
+        RedisConnection.command(conn, ["ZRANGE", Keys.waiting_children(ctx), 0, -1])
+
+      refute parent_id in wc_list
+
+      Worker.close(worker_child)
+      Worker.close(worker_parent)
     end
   end
 end
