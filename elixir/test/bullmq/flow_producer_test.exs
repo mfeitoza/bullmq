@@ -788,5 +788,72 @@ defmodule BullMQ.FlowProducerTest do
       Worker.close(worker_child)
       Worker.close(worker_parent)
     end
+
+    test "parent fails when child job with fail_parent_on_failure: true fails", %{
+      queue_name: queue_name,
+      conn: conn
+    } do
+      test_pid = self()
+      parent_queue = queue_name
+      child_queue = "#{parent_queue}_child"
+
+      {:ok, worker_child} =
+        Worker.start_link(
+          queue: child_queue,
+          connection: conn,
+          processor: fn job ->
+            send(test_pid, {:processed, job.name, job.id})
+            {:error, %{result: "Child Failed"}}
+          end
+        )
+
+      {:ok, worker_parent} =
+        Worker.start_link(
+          queue: parent_queue,
+          connection: conn,
+          processor: fn job ->
+            send(test_pid, {:processed, job.name, job.id})
+            {:ok, %{result: job.name}}
+          end
+        )
+
+      flow = %{
+        name: "parent",
+        queue_name: parent_queue,
+        data: %{type: "parent"},
+        children: [
+          %{
+            name: "child_failing",
+            queue_name: child_queue,
+            data: %{id: 1},
+            opts: %{
+              attempts: 1,
+              fail_parent_on_failure: true
+            }
+          }
+        ]
+      }
+
+      {:ok, result} = FlowProducer.add(flow, connection: conn)
+      parent_id = result.job.id
+
+      # Wait for child to be processed and fail
+      assert_receive {:processed, "child_failing", _child_id}, 10_000
+
+      # Parent should not be processed by worker_parent
+      refute_receive {:processed, "parent", ^parent_id}, 1_000
+
+      # Check that parent job state is failed
+      {:ok, state} = Queue.get_job_state(parent_queue, parent_id, connection: conn)
+      assert state == "failed"
+
+      # Fetch parent job to verify failed_reason is present
+      {:ok, parent_job} = Queue.get_job(parent_queue, parent_id, connection: conn)
+      assert parent_job != nil
+      assert parent_job.failed_reason != nil
+
+      Worker.close(worker_child)
+      Worker.close(worker_parent)
+    end
   end
 end
