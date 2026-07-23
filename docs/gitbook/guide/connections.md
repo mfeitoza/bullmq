@@ -100,9 +100,36 @@ const myWorker = new Worker('myqueue', async job => {}, { connection });
 
 BullMQ does not instantiate Bun's client for you. Create the raw Bun client in your application and wrap it with `createBunRedisClient`.
 
+When you share a single wrapped connection across many Queues and Workers, close it through the wrapper returned by `createBunRedisClient` (for example `connection.disconnect()` or `await connection.quit()`) once every Queue/Worker has been closed. Do **not** call `close()` on the raw Bun `RedisClient` directly: the wrapper cannot flag that shutdown as intentional, so in-flight commands reject with `ConnectionClosedError` and the wrapper attempts to reconnect. Closing through the wrapper drains those commands cleanly, just like `quit()` does with ioredis.
+
+```typescript
+// Graceful shutdown
+await myWorker.close();
+await myQueue.close();
+connection.disconnect(); // or: await connection.quit();
+```
+
 {% hint style="info" %}
 The `RedisClient` class is provided by Bun runtime. Run this code in Bun (`bun run ...`), not plain Node.js.
 {% endhint %}
+
+### Using Valkey Glide
+
+Valkey Glide has a different API than ioredis/node-redis. Wrap the Glide client with `createValkeyGlideClient` before passing it to BullMQ.
+
+```typescript
+import { GlideClusterClient } from '@valkey/valkey-glide';
+import { Queue, Worker, createValkeyGlideClient } from 'bullmq';
+
+const rawClient = await GlideClusterClient.createClient({
+  addresses: [{ host: 'localhost', port: 6379 }],
+});
+
+const connection = createValkeyGlideClient(rawClient);
+
+const myQueue = new Queue('myqueue', { connection });
+const myWorker = new Worker('myqueue', async job => {}, { connection });
+```
 
 ### Creating clients globally
 
@@ -165,6 +192,7 @@ For most applications, prefer one of the built-in adapters:
 - `createIORedisClient` for ioredis `Redis` and `Cluster` instances.
 - `createNodeRedisClient` for node-redis clients.
 - `createBunRedisClient` for Bun's built-in Redis client.
+- `createValkeyGlideClient` for Valkey Glide clients.
 
 #### `maxRetriesPerRequest`
 
