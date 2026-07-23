@@ -2278,14 +2278,8 @@ defmodule BullMQ.Worker do
   # Helper to extract a value from job.opts supporting both atom and string keys
   defp get_job_opt(%Job{opts: opts}, atom_key, string_key, default) when is_map(opts) do
     case Map.get(opts, atom_key) do
-      nil ->
-        case Map.get(opts, string_key) do
-          nil -> get_short_key_opt(opts, atom_key, default)
-          value -> value
-        end
-
-      value ->
-        value
+      nil -> Map.get(opts, string_key, default)
+      value -> value
     end
   end
 
@@ -2297,20 +2291,6 @@ defmodule BullMQ.Worker do
   end
 
   defp get_job_opt(_, _, _, default), do: default
-
-  defp get_short_key_opt(opts, :fail_parent_on_failure, default),
-    do: Map.get(opts, "fpof", default)
-
-  defp get_short_key_opt(opts, :continue_parent_on_failure, default),
-    do: Map.get(opts, "cpof", default)
-
-  defp get_short_key_opt(opts, :ignore_dependency_on_failure, default),
-    do: Map.get(opts, "idof", default)
-
-  defp get_short_key_opt(opts, :remove_dependency_on_failure, default),
-    do: Map.get(opts, "rdof", default)
-
-  defp get_short_key_opt(_opts, _key, default), do: default
 
   defp find_job_by_ref(active_jobs, ref) do
     Enum.find(active_jobs, fn {_id, {_job, task_ref}} -> task_ref == ref end)
