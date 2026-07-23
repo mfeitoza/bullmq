@@ -1434,6 +1434,11 @@ defmodule BullMQ.Worker do
   # Run processor synchronously (called within worker process)
   # The cancel_token parameter allows passing a pre-created token
   # (used by autonomous workers who need to register the token before processing)
+  defp run_processor_sync(%Job{deferred_failure: defa}, _ctx, _cancel_token)
+       when is_binary(defa) and defa != "" do
+    {:unrecoverable_error, defa}
+  end
+
   defp run_processor_sync(job, ctx, cancel_token) do
     processor = ctx.processor
 
@@ -1462,6 +1467,10 @@ defmodule BullMQ.Worker do
   end
 
   # Handle job result: complete/fail and fetch next job
+  defp handle_job_result(job, {:unrecoverable_error, error_msg}, ctx) do
+    handle_job_failure(job, error_msg, [], ctx, false)
+  end
+
   defp handle_job_result(job, {:ok, result}, ctx) do
     return_value = normalize_result(result)
 
@@ -1534,7 +1543,11 @@ defmodule BullMQ.Worker do
   end
 
   defp handle_job_result(job, {:error, error_msg, stacktrace}, ctx) do
-    if Job.should_retry?(job) do
+    handle_job_failure(job, error_msg, stacktrace, ctx, Job.should_retry?(job))
+  end
+
+  defp handle_job_failure(job, error_msg, stacktrace, ctx, should_retry?) do
+    if should_retry? do
       backoff_delay = Job.calculate_backoff(job)
       effective_delay = max(backoff_delay, 1)
 
@@ -1573,7 +1586,14 @@ defmodule BullMQ.Worker do
     else
       move_opts = build_worker_move_opts(ctx, job) ++ [stacktrace: format_stacktrace(stacktrace)]
 
-      case Scripts.move_to_failed(ctx.connection, ctx.keys, job.id, job.token, error_msg, move_opts) do
+      case Scripts.move_to_failed(
+             ctx.connection,
+             ctx.keys,
+             job.id,
+             job.token,
+             error_msg,
+             move_opts
+           ) do
         {:ok, [job_data, job_id, _limit_delay, _delay_until]}
         when is_list(job_data) and job_data != [] ->
           # Emit on_failed callback with failed_reason set
@@ -1618,10 +1638,14 @@ defmodule BullMQ.Worker do
       limiter: ctx.limiter,
       remove_on_complete: ctx.remove_on_complete,
       remove_on_fail: ctx.remove_on_fail,
-      fail_parent_on_failure: false,
-      continue_parent_on_failure: false,
-      ignore_dependency_on_failure: false,
-      remove_dependency_on_failure: false
+      fail_parent_on_failure:
+        get_job_opt(job, :fail_parent_on_failure, "fail_parent_on_failure", false),
+      continue_parent_on_failure:
+        get_job_opt(job, :continue_parent_on_failure, "continue_parent_on_failure", false),
+      ignore_dependency_on_failure:
+        get_job_opt(job, :ignore_dependency_on_failure, "ignore_dependency_on_failure", false),
+      remove_dependency_on_failure:
+        get_job_opt(job, :remove_dependency_on_failure, "remove_dependency_on_failure", false)
     ]
   end
 
@@ -1683,7 +1707,10 @@ defmodule BullMQ.Worker do
           result
 
         {:error, reason} ->
-          Logger.warning("[BullMQ.Worker] Failed to create blocking connection: #{inspect(reason)}")
+          Logger.warning(
+            "[BullMQ.Worker] Failed to create blocking connection: #{inspect(reason)}"
+          )
+
           {:error, reason}
       end
     end
@@ -2237,10 +2264,14 @@ defmodule BullMQ.Worker do
       limiter: state.limiter,
       remove_on_complete: state.remove_on_complete || %{"count" => -1},
       remove_on_fail: state.remove_on_fail || %{"count" => -1},
-      fail_parent_on_failure: false,
-      continue_parent_on_failure: false,
-      ignore_dependency_on_failure: false,
-      remove_dependency_on_failure: false
+      fail_parent_on_failure:
+        get_job_opt(job, :fail_parent_on_failure, "fail_parent_on_failure", false),
+      continue_parent_on_failure:
+        get_job_opt(job, :continue_parent_on_failure, "continue_parent_on_failure", false),
+      ignore_dependency_on_failure:
+        get_job_opt(job, :ignore_dependency_on_failure, "ignore_dependency_on_failure", false),
+      remove_dependency_on_failure:
+        get_job_opt(job, :remove_dependency_on_failure, "remove_dependency_on_failure", false)
     ]
   end
 
